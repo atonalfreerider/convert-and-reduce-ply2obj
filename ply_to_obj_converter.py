@@ -3,6 +3,7 @@ import glob
 import numpy as np
 import struct
 import argparse
+from scipy.spatial import cKDTree
 
 def parse_ply(file_path):
     with open(file_path, 'rb') as f:
@@ -94,45 +95,78 @@ def write_obj(filepath, vertices, faces, chunk_size=1000000):
             for face in chunk:
                 f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
 
+def compute_edge_cost(v1, v2, q1, q2):
+    v = (v1 + v2) / 2
+    q = q1 + q2
+    v_homogeneous = np.append(v, 1)  # Convert to homogeneous coordinates
+    cost = np.dot(v_homogeneous, np.dot(q, v_homogeneous))
+    return cost, v
+
 def fast_decimate_mesh(vertices, faces, target_faces):
-    print("Starting fast decimation...")
+    print("Starting improved decimation...")
     
-    # Determine the bounding box of the mesh
-    min_coords = np.min(vertices, axis=0)
-    max_coords = np.max(vertices, axis=0)
-    
-    # Calculate the number of cells in each dimension
-    cell_count = int((len(faces) / target_faces) ** (1/3))
-    cell_size = (max_coords - min_coords) / cell_count
-    
-    # Create a dictionary to store the clusters
-    clusters = {}
-    
-    # Cluster vertices
-    for i, vertex in enumerate(vertices):
-        cell_coords = tuple((vertex - min_coords) // cell_size)
-        if cell_coords not in clusters:
-            clusters[cell_coords] = []
-        clusters[cell_coords].append(i)
-    
-    # Create new vertices (cluster centers)
-    new_vertices = []
-    old_to_new = {}
-    for cluster in clusters.values():
-        new_index = len(new_vertices)
-        for old_index in cluster:
-            old_to_new[old_index] = new_index
-        new_vertices.append(np.mean(vertices[cluster], axis=0))
-    
-    # Create new faces
-    new_faces = []
+    # Compute face normals and areas
+    v0, v1, v2 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
+    face_normals = np.cross(v1 - v0, v2 - v0)
+    face_areas = np.linalg.norm(face_normals, axis=1) / 2
+    face_normals /= np.linalg.norm(face_normals, axis=1)[:, np.newaxis]
+
+    # Compute vertex quadrics
+    quadrics = [np.zeros((4, 4)) for _ in range(len(vertices))]
+    for i, face in enumerate(faces):
+        n = face_normals[i]
+        a, b, c, d = n[0], n[1], n[2], -np.dot(n, vertices[face[0]])
+        q = np.array([[a*a, a*b, a*c, a*d],
+                      [a*b, b*b, b*c, b*d],
+                      [a*c, b*c, c*c, c*d],
+                      [a*d, b*d, c*d, d*d]]) * face_areas[i]
+        for v in face:
+            quadrics[v] += q
+
+    # Create edge list
+    edges = set()
     for face in faces:
-        new_face = [old_to_new[v] for v in face]
-        if len(set(new_face)) == 3:  # Only keep faces with 3 unique vertices
-            new_faces.append(new_face)
+        for i in range(3):
+            edge = tuple(sorted([face[i], face[(i+1)%3]]))
+            edges.add(edge)
+    edges = list(edges)
+
+    # Compute initial edge costs
+    edge_costs = []
+    for v1, v2 in edges:
+        cost, new_v = compute_edge_cost(vertices[v1], vertices[v2], quadrics[v1], quadrics[v2])
+        edge_costs.append((cost, (v1, v2), new_v))
     
-    print(f"Fast decimation completed. New vertex count: {len(new_vertices)}, New face count: {len(new_faces)}")
-    return np.array(new_vertices), np.array(new_faces)
+    edge_costs.sort()
+
+    # Decimate
+    new_vertices = vertices.copy()
+    valid = np.ones(len(vertices), dtype=bool)
+    while len(faces) > target_faces and edge_costs:
+        cost, (v1, v2), new_v = edge_costs.pop(0)
+        
+        if not valid[v1] or not valid[v2]:
+            continue
+        
+        # Collapse edge
+        new_vertices[v1] = new_v
+        valid[v2] = False
+
+        # Update faces
+        faces = faces[~np.any(faces == v2, axis=1)]
+        faces[faces == v2] = v1
+        faces = faces[np.min(faces, axis=1) != np.max(faces, axis=1)]
+
+        if len(faces) % 1000 == 0:
+            print(f"Faces remaining: {len(faces)}")
+
+    # Remove unused vertices
+    new_vertices = new_vertices[valid]
+    index_map = np.cumsum(valid) - 1
+    faces = index_map[faces]
+
+    print(f"Improved decimation completed. New vertex count: {len(new_vertices)}, New face count: {len(faces)}")
+    return new_vertices, faces
 
 def process_ply_file(ply_file, output_dir, decimate_factor):
     try:
