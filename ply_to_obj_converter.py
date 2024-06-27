@@ -2,6 +2,7 @@ import os
 import glob
 import numpy as np
 import struct
+import argparse
 
 def parse_ply(file_path):
     with open(file_path, 'rb') as f:
@@ -133,25 +134,13 @@ def fast_decimate_mesh(vertices, faces, target_faces):
     print(f"Fast decimation completed. New vertex count: {len(new_vertices)}, New face count: {len(new_faces)}")
     return np.array(new_vertices), np.array(new_faces)
 
-# Set these paths according to your setup
-input_dir = "/home/john/Desktop/3D-Pose/MultiPly/code/outputs/Hi4D/taichi01/test_mesh/0/"
-output_dir = "/home/john/Desktop/3D-Pose/MultiPly/code/outputs/Hi4D/taichi01/reduce_obj/0/"
-
-# Ensure output directory exists
-os.makedirs(output_dir, exist_ok=True)
-
-# Get all PLY files in the input directory
-ply_files = glob.glob(os.path.join(input_dir, "*.ply"))
-print(f"Found {len(ply_files)} PLY files")
-
-for ply_file in ply_files:
-    print(f"\nProcessing: {ply_file}")
+def process_ply_file(ply_file, output_dir, decimate_factor):
     try:
         # Parse PLY file
         vertices, faces = parse_ply(ply_file)
 
         # Decimate mesh
-        target_faces = max(int(len(faces) * 0.01), 4)  # 1% of original faces, minimum 4
+        target_faces = max(int(len(faces) * decimate_factor), 4)  # Minimum 4 faces
         decimated_vertices, decimated_faces = fast_decimate_mesh(vertices, faces, target_faces)
 
         print(f"Original faces: {len(faces)}, Decimated faces: {len(decimated_faces)}")
@@ -168,4 +157,28 @@ for ply_file in ply_files:
         import traceback
         traceback.print_exc()
 
-print("Conversion and decimation complete!")
+def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Convert PLY files to decimated OBJ files.")
+    parser.add_argument("input_dir", help="Directory containing input PLY files")
+    parser.add_argument("output_dir", help="Directory for output OBJ files")
+    parser.add_argument("--decimate", type=float, default=0.01, help="Decimation factor (0.01 = 1% of original faces)")
+    
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Ensure output directory exists
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Get all PLY files in the input directory
+    ply_files = glob.glob(os.path.join(args.input_dir, "*.ply"))
+    print(f"Found {len(ply_files)} PLY files")
+
+    for ply_file in ply_files:
+        print(f"\nProcessing: {ply_file}")
+        process_ply_file(ply_file, args.output_dir, args.decimate)
+
+    print("Conversion and decimation complete!")
+
+if __name__ == "__main__":
+    main()
