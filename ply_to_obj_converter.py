@@ -2,6 +2,7 @@ import os
 import glob
 import numpy as np
 import struct
+from collections import defaultdict
 
 def parse_ply(file_path):
     with open(file_path, 'rb') as f:
@@ -79,8 +80,6 @@ def parse_ply(file_path):
 
     return vertices, faces
 
-# ... (rest of the script remains the same)
-
 def write_obj(filepath, vertices, faces, chunk_size=1000000):
     with open(filepath, 'w') as f:
         # Write vertices
@@ -95,11 +94,77 @@ def write_obj(filepath, vertices, faces, chunk_size=1000000):
             for face in chunk:
                 f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
 
+def compute_quadric(v, faces, vertices):
+    q = np.zeros((4, 4))
+    for face in faces:
+        if v in face:
+            tri = vertices[face]
+            normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+            normal /= np.linalg.norm(normal)
+            a, b, c = normal
+            d = -np.dot(normal, tri[0])
+            p = np.array([a, b, c, d])
+            q += np.outer(p, p)
+    return q
+
+def compute_error(q, v):
+    v = np.append(v, 1)
+    return np.dot(v, np.dot(q, v))
+
 def decimate_mesh(vertices, faces, target_faces):
-    # Simple decimation: keep every nth face
-    n = max(len(faces) // target_faces, 1)
-    decimated_faces = faces[::n]
-    return vertices, decimated_faces
+    print("Starting decimation...")
+    vertices = np.array(vertices, dtype=np.float32, copy=True)
+    
+    # Compute initial quadrics
+    quadrics = [compute_quadric(i, faces, vertices) for i in range(len(vertices))]
+    
+    # Create edge heap
+    edge_heap = []
+    for face in faces:
+        for i in range(3):
+            v1, v2 = face[i], face[(i+1)%3]
+            if v1 < v2:
+                q = quadrics[v1] + quadrics[v2]
+                cost = compute_error(q, (vertices[v1] + vertices[v2]) / 2)
+                heapq.heappush(edge_heap, (cost, (v1, v2)))
+
+    # Decimate
+    while len(faces) > target_faces and edge_heap:
+        _, (v1, v2) = heapq.heappop(edge_heap)
+        
+        # Check if this edge is still valid
+        if v2 not in faces[faces == v1].flatten():
+            continue
+        
+        # Compute optimal position
+        q = quadrics[v1] + quadrics[v2]
+        q_3x3 = q[:3, :3]
+        b = -q[:3, 3]
+        try:
+            new_pos = np.linalg.solve(q_3x3, b)
+        except np.linalg.LinAlgError:
+            new_pos = (vertices[v1] + vertices[v2]) / 2
+
+        # Update mesh
+        vertices[v1] = new_pos
+        quadrics[v1] = q
+        faces = np.array([f for f in faces if v2 not in f])
+        faces[faces == v2] = v1
+
+        # Update edges
+        affected_vertices = np.unique(faces[np.any(faces == v1, axis=1)].flatten())
+        for v in affected_vertices:
+            if v != v1:
+                q = quadrics[v1] + quadrics[v]
+                cost = compute_error(q, (vertices[v1] + vertices[v]) / 2)
+                heapq.heappush(edge_heap, (cost, (min(v1, v), max(v1, v))))
+
+        if len(faces) % 1000 == 0:
+            print(f"Faces remaining: {len(faces)}")
+
+    print("Decimation completed.")
+    return vertices, faces
+
 
 # Set these paths according to your setup
 input_dir = "/home/john/Desktop/3D-Pose/MultiPly/code/outputs/Hi4D/taichi01/test_mesh/0/"
