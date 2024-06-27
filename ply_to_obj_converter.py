@@ -1,49 +1,85 @@
 import os
 import glob
 import numpy as np
+import struct
 
 def parse_ply(file_path):
     with open(file_path, 'rb') as f:
-        if f.read(3).decode('ascii') != "ply":
-            raise ValueError("Not a PLY file")
+        content = f.read()
 
-        vertex_count = face_count = 0
-        face_props = []
+    if content[:3].decode('ascii') != "ply":
+        raise ValueError("Not a PLY file")
 
-        # Parse header
-        while True:
-            line = f.readline().strip().decode('ascii')
-            if line == "end_header":
-                break
-            elif line.startswith("element vertex"):
-                vertex_count = int(line.split()[-1])
-            elif line.startswith("element face"):
-                face_count = int(line.split()[-1])
-            elif line.startswith("property list") and face_count > 0:
-                face_props = line.split()[-2:]
+    # Find the start of vertex data
+    header_end = content.index(b'end_header\n') + len(b'end_header\n')
+    header = content[:header_end].decode('ascii')
 
-        print(f"Vertex count: {vertex_count}")
-        print(f"Face count: {face_count}")
-        print(f"Face properties: {face_props}")
+    # Parse header
+    lines = header.split('\n')
+    vertex_count = face_count = 0
+    vertex_props = []
+    face_props = None
+    for line in lines:
+        if line.startswith("element vertex"):
+            vertex_count = int(line.split()[-1])
+        elif line.startswith("element face"):
+            face_count = int(line.split()[-1])
+        elif line.startswith("property") and vertex_count > 0 and face_count == 0:
+            vertex_props.append(line.split()[-1])
+        elif line.startswith("property list") and "vertex_indices" in line:
+            face_props = line.split()
 
-        # Read vertices
-        vertices = np.fromfile(f, dtype='<f4', count=vertex_count*3).reshape(-1, 3)
+    print(f"Vertex count: {vertex_count}")
+    print(f"Face count: {face_count}")
+    print(f"Vertex properties: {vertex_props}")
+    print(f"Face properties: {face_props}")
 
-        # Read faces
-        if face_props[-2] == 'uchar':
-            face_dtype = np.dtype([('count', '<u1'), ('indices', '<i4', (3,))])
-        elif face_props[-2] == 'uint':
-            face_dtype = np.dtype([('count', '<u4'), ('indices', '<i4', (3,))])
-        elif face_props[-2] == 'int':
-            face_dtype = np.dtype([('count', '<i4'), ('indices', '<i4', (3,))])
-        else:
-            raise ValueError(f"Unsupported face property type: {face_props[-2]}")
+    # Read vertices
+    vertex_size = 4 * len(vertex_props)
+    vertex_data = content[header_end:header_end + vertex_count * vertex_size]
+    vertices = np.frombuffer(vertex_data, dtype='<f4').reshape(-1, len(vertex_props))
+    vertices = vertices[:, :3]  # Only keep x, y, z coordinates
+
+    # Read faces
+    face_data_start = header_end + vertex_count * vertex_size
+    face_data = content[face_data_start:]
+    
+    faces = []
+    offset = 0
+    for i in range(face_count):
+        if offset + 4 > len(face_data):
+            print(f"Warning: Reached end of face data after {i} faces")
+            break
         
-        faces = np.fromfile(f, dtype=face_dtype, count=face_count)['indices']
+        # Read the number of vertices for this face
+        if face_props[2] == 'uchar':
+            num_vertices = struct.unpack('<B', face_data[offset:offset+1])[0]
+            offset += 1
+        elif face_props[2] in ['uint', 'int']:
+            num_vertices = struct.unpack('<I', face_data[offset:offset+4])[0]
+            offset += 4
+        else:
+            raise ValueError(f"Unsupported face property type: {face_props[2]}")
+        
+        if offset + 4 * num_vertices > len(face_data):
+            print(f"Warning: Not enough data for face {i}. Expected {num_vertices} vertices.")
+            break
+        
+        face = struct.unpack(f'<{num_vertices}I', face_data[offset:offset+4*num_vertices])
+        offset += 4 * num_vertices
+        faces.append(face)
+        
+        if i < 5 or i >= face_count - 5:
+            print(f"Face {i}: {face}")
 
-        print(f"Parsed {len(vertices)} vertices and {len(faces)} faces")
+    faces = np.array(faces)
+    print(f"Parsed {len(vertices)} vertices and {len(faces)} faces")
+    print(f"First few faces: {faces[:5]}")
+    print(f"Last few faces: {faces[-5:]}")
 
-        return vertices, faces
+    return vertices, faces
+
+# ... (rest of the script remains the same)
 
 def write_obj(filepath, vertices, faces, chunk_size=1000000):
     with open(filepath, 'w') as f:
@@ -83,7 +119,7 @@ for ply_file in ply_files:
         vertices, faces = parse_ply(ply_file)
 
         # Decimate mesh
-        target_faces = max(int(len(faces) * 0.1), 4)  # 1% of original faces, minimum 4
+        target_faces = max(int(len(faces) * 0.01), 4)  # 1% of original faces, minimum 4
         decimated_vertices, decimated_faces = decimate_mesh(vertices, faces, target_faces)
 
         print(f"Original faces: {len(faces)}, Decimated faces: {len(decimated_faces)}")
@@ -97,5 +133,7 @@ for ply_file in ply_files:
 
     except Exception as e:
         print(f"Error processing {ply_file}: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 print("Conversion and decimation complete!")
